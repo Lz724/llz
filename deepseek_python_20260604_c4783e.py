@@ -3,9 +3,10 @@ import pandas as pd
 import time
 import math
 from datetime import datetime
-import plotly.graph_objects as go
-import plotly.express as px
-import numpy as np
+import folium
+from streamlit_folium import folium_static
+from branca.element import Figure
+import json
 
 # ---------------------------- 坐标系转换算法 ----------------------------
 def transform_lat(lng, lat):
@@ -71,11 +72,11 @@ def init_state():
         st.session_state.flight_height = 50.0
     if "obstacles" not in st.session_state:
         st.session_state.obstacles = [
-            {"lat": 32.2328, "lng": 118.7485, "radius": 30, "name": "教学楼", "height": 20},
-            {"lat": 32.2335, "lng": 118.7492, "radius": 35, "name": "图书馆", "height": 25},
-            {"lat": 32.2330, "lng": 118.7500, "radius": 28, "name": "实验楼", "height": 22},
-            {"lat": 32.2325, "lng": 118.7495, "radius": 25, "name": "食堂", "height": 15},
-            {"lat": 32.2320, "lng": 118.7480, "radius": 20, "name": "体育馆", "height": 18},
+            {"lat": 32.2328, "lng": 118.7485, "radius": 30, "name": "教学楼"},
+            {"lat": 32.2335, "lng": 118.7492, "radius": 35, "name": "图书馆"},
+            {"lat": 32.2330, "lng": 118.7500, "radius": 28, "name": "实验楼"},
+            {"lat": 32.2325, "lng": 118.7495, "radius": 25, "name": "食堂"},
+            {"lat": 32.2318, "lng": 118.7482, "radius": 22, "name": "体育馆"},
         ]
     if "map_zoom" not in st.session_state:
         st.session_state.map_zoom = 16
@@ -97,255 +98,217 @@ def reset_monitor():
     st.session_state.records = []
     st.session_state.alert_msg = ""
 
-def create_3d_map():
-    """创建交互式3D地图使用Plotly"""
+def create_folium_map():
+    """创建交互式地图使用Folium"""
     
-    fig = go.Figure()
+    # 确定地图中心点
+    if st.session_state.point_A["set"]:
+        center_lat = st.session_state.point_A["lat"]
+        center_lng = st.session_state.point_A["lng"]
+    elif st.session_state.point_B["set"]:
+        center_lat = st.session_state.point_B["lat"]
+        center_lng = st.session_state.point_B["lng"]
+    else:
+        center_lat = 32.2332
+        center_lng = 118.7492
     
-    # 获取A、B点的WGS-84坐标
-    a_wgs_lng, a_wgs_lat = None, None
-    b_wgs_lng, b_wgs_lat = None, None
+    # 创建地图（使用多种瓦片服务确保显示）
+    m = folium.Map(
+        location=[center_lat, center_lng],
+        zoom_start=st.session_state.map_zoom,
+        control_scale=True,
+        tiles='OpenStreetMap'
+    )
+    
+    # 添加备用瓦片（可选择）
+    folium.TileLayer('CartoDB positron', name='浅色地图').add_to(m)
+    folium.TileLayer('CartoDB dark_matter', name='深色地图').add_to(m)
+    
+    # 添加全屏按钮
+    folium.plugins.Fullscreen(position='topright').add_to(m)
+    
+    # 添加测量工具
+    folium.plugins.MeasureControl(
+        position='topleft',
+        primary_length_unit='meters',
+        secondary_length_unit='kilometers',
+        primary_area_unit='sqmeters'
+    ).add_to(m)
+    
+    # 添加绘图工具（用于圈选障碍物）
+    draw = folium.plugins.Draw(
+        export=True,
+        position='topleft',
+        draw_options={
+            'polyline': True,
+            'polygon': True,
+            'circle': True,
+            'rectangle': True,
+            'marker': True,
+            'circlemarker': True
+        }
+    )
+    draw.add_to(m)
     
     # 添加A点（绿色）
     if st.session_state.point_A["set"]:
-        a_wgs_lng, a_wgs_lat = convert_coords(
-            st.session_state.point_A["lat"], 
-            st.session_state.point_A["lng"], 
-            st.session_state.coord_system, 
-            "WGS-84"
-        )
-        fig.add_trace(go.Scatter3d(
-            x=[a_wgs_lng],
-            y=[a_wgs_lat],
-            z=[0],
-            mode='markers+text',
-            marker=dict(size=10, color='green', symbol='circle'),
-            text=['起点A'],
-            textposition='top center',
-            name='起点A',
-            hovertemplate='起点A<br>经度: %{x:.6f}<br>纬度: %{y:.6f}<extra></extra>'
-        ))
+        # 获取显示坐标（用户选择的坐标系）
+        display_lng, display_lat = st.session_state.point_A["lng"], st.session_state.point_A["lat"]
         
-        # 添加A点柱状指示
-        fig.add_trace(go.Scatter3d(
-            x=[a_wgs_lng, a_wgs_lng],
-            y=[a_wgs_lat, a_wgs_lat],
-            z=[0, 50],
-            mode='lines',
-            line=dict(color='green', width=3),
-            showlegend=False,
-            hoverinfo='skip'
-        ))
+        # 添加标记
+        folium.Marker(
+            location=[display_lat, display_lng],
+            popup=f"""
+            <div style="min-width: 150px;">
+                <h4>起点A</h4>
+                <p><b>纬度:</b> {display_lat:.6f}<br>
+                <b>经度:</b> {display_lng:.6f}<br>
+                <b>坐标系:</b> {st.session_state.coord_system}</p>
+            </div>
+            """,
+            icon=folium.Icon(color="green", icon="play", prefix="fa"),
+            tooltip="起点A"
+        ).add_to(m)
+        
+        # 添加圆形高亮
+        folium.Circle(
+            radius=20,
+            location=[display_lat, display_lng],
+            color="green",
+            fill=True,
+            fill_opacity=0.2,
+            weight=3
+        ).add_to(m)
+        
+        # 添加信息框
+        folium.map.Marker(
+            [display_lat, display_lng],
+            icon=folium.DivIcon(
+                html=f'<div style="font-size: 12pt; color: green; font-weight: bold;">A</div>'
+            )
+        ).add_to(m)
     
     # 添加B点（红色）
     if st.session_state.point_B["set"]:
-        b_wgs_lng, b_wgs_lat = convert_coords(
-            st.session_state.point_B["lat"], 
-            st.session_state.point_B["lng"], 
-            st.session_state.coord_system, 
-            "WGS-84"
-        )
-        fig.add_trace(go.Scatter3d(
-            x=[b_wgs_lng],
-            y=[b_wgs_lat],
-            z=[0],
-            mode='markers+text',
-            marker=dict(size=10, color='red', symbol='circle'),
-            text=['终点B'],
-            textposition='top center',
-            name='终点B',
-            hovertemplate='终点B<br>经度: %{x:.6f}<br>纬度: %{y:.6f}<extra></extra>'
-        ))
+        display_lng, display_lat = st.session_state.point_B["lng"], st.session_state.point_B["lat"]
         
-        # 添加B点柱状指示
-        fig.add_trace(go.Scatter3d(
-            x=[b_wgs_lng, b_wgs_lng],
-            y=[b_wgs_lat, b_wgs_lat],
-            z=[0, 50],
-            mode='lines',
-            line=dict(color='red', width=3),
-            showlegend=False,
-            hoverinfo='skip'
-        ))
+        folium.Marker(
+            location=[display_lat, display_lng],
+            popup=f"""
+            <div style="min-width: 150px;">
+                <h4>终点B</h4>
+                <p><b>纬度:</b> {display_lat:.6f}<br>
+                <b>经度:</b> {display_lng:.6f}<br>
+                <b>坐标系:</b> {st.session_state.coord_system}</p>
+            </div>
+            """,
+            icon=folium.Icon(color="red", icon="flag-checkered", prefix="fa"),
+            tooltip="终点B"
+        ).add_to(m)
+        
+        folium.Circle(
+            radius=20,
+            location=[display_lat, display_lng],
+            color="red",
+            fill=True,
+            fill_opacity=0.2,
+            weight=3
+        ).add_to(m)
+        
+        folium.map.Marker(
+            [display_lat, display_lng],
+            icon=folium.DivIcon(
+                html='<div style="font-size: 12pt; color: red; font-weight: bold;">B</div>'
+            )
+        ).add_to(m)
     
-    # 添加航线（AB连线，带飞行高度）
+    # 添加AB航线
     if st.session_state.point_A["set"] and st.session_state.point_B["set"]:
-        # 地面投影线
-        fig.add_trace(go.Scatter3d(
-            x=[a_wgs_lng, b_wgs_lng],
-            y=[a_wgs_lat, b_wgs_lat],
-            z=[0, 0],
-            mode='lines',
-            line=dict(color='gray', width=2, dash='dash'),
-            name='地面投影',
-            hovertinfo='skip'
-        ))
+        a_lng, a_lat = st.session_state.point_A["lng"], st.session_state.point_A["lat"]
+        b_lng, b_lat = st.session_state.point_B["lng"], st.session_state.point_B["lat"]
         
-        # 空中航线
-        fig.add_trace(go.Scatter3d(
-            x=[a_wgs_lng, b_wgs_lng],
-            y=[a_wgs_lat, b_wgs_lat],
-            z=[st.session_state.flight_height, st.session_state.flight_height],
-            mode='lines+markers',
-            line=dict(color='yellow', width=5),
-            marker=dict(size=5, color='yellow'),
-            name=f'航线 (高度: {st.session_state.flight_height}m)',
-            hovertemplate='航线<br>高度: %{z}m<extra></extra>'
-        ))
+        points = [[a_lat, a_lng], [b_lat, b_lng]]
         
-        # 添加垂直连接线
-        fig.add_trace(go.Scatter3d(
-            x=[a_wgs_lng, a_wgs_lng],
-            y=[a_wgs_lat, a_wgs_lat],
-            z=[0, st.session_state.flight_height],
-            mode='lines',
-            line=dict(color='lightgreen', width=2, dash='dot'),
-            showlegend=False,
-            hoverinfo='skip'
-        ))
-        fig.add_trace(go.Scatter3d(
-            x=[b_wgs_lng, b_wgs_lng],
-            y=[b_wgs_lat, b_wgs_lat],
-            z=[0, st.session_state.flight_height],
-            mode='lines',
-            line=dict(color='lightcoral', width=2, dash='dot'),
-            showlegend=False,
-            hoverinfo='skip'
-        ))
+        # 航线
+        folium.PolyLine(
+            points,
+            color="yellow",
+            weight=5,
+            opacity=0.8,
+            popup=f"规划航线 (高度: {st.session_state.flight_height}m)",
+            tooltip=f"航线高度: {st.session_state.flight_height}m"
+        ).add_to(m)
+        
+        # 添加方向箭头（中点位置）
+        mid_lat = (a_lat + b_lat) / 2
+        mid_lng = (a_lng + b_lng) / 2
+        
+        # 添加距离标注
+        from geopy.distance import geodesic
+        distance = geodesic((a_lat, a_lng), (b_lat, b_lng)).meters
+        folium.map.Marker(
+            [mid_lat, mid_lng],
+            icon=folium.DivIcon(
+                html=f'<div style="background-color: white; padding: 2px 5px; border-radius: 5px; border: 1px solid yellow;">{distance:.0f}m</div>'
+            )
+        ).add_to(m)
     
-    # 添加障碍物（圆柱体表示）
+    # 添加障碍物（红色半透明圆）
     for obs in st.session_state.obstacles:
-        obs_wgs_lng, obs_wgs_lat = convert_coords(obs["lat"], obs["lng"], "WGS-84", "WGS-84")
+        # 障碍物坐标转换到当前用户坐标系
+        obs_lng_display, obs_lat_display = convert_coords(
+            obs["lat"], obs["lng"], 
+            from_system="WGS-84", 
+            to_system=st.session_state.coord_system
+        )
         
-        # 创建圆柱体表示障碍物
-        theta = np.linspace(0, 2*np.pi, 50)
-        r = obs["radius"] / 111000  # 转换为度（近似）
-        x_cylinder = obs_wgs_lng + r * np.cos(theta)
-        y_cylinder = obs_wgs_lat + r * np.sin(theta)
-        z_cylinder = np.full_like(theta, obs.get("height", 20))
+        # 绘制障碍物圆形区域
+        folium.Circle(
+            radius=obs["radius"],
+            location=[obs_lat_display, obs_lng_display],
+            color="red",
+            fill=True,
+            fill_opacity=0.4,
+            weight=2,
+            popup=f"""
+            <div>
+                <b>⚠️ {obs['name']}</b><br>
+                半径: {obs['radius']}m<br>
+                纬度: {obs_lat_display:.6f}<br>
+                经度: {obs_lng_display:.6f}
+            </div>
+            """,
+            tooltip=f"{obs['name']} (半径: {obs['radius']}m)"
+        ).add_to(m)
         
-        # 圆柱体底部
-        fig.add_trace(go.Scatter3d(
-            x=x_cylinder,
-            y=y_cylinder,
-            z=np.zeros_like(theta),
-            mode='lines',
-            line=dict(color='red', width=2),
-            showlegend=False,
-            hoverinfo='skip'
-        ))
-        
-        # 圆柱体顶部
-        fig.add_trace(go.Scatter3d(
-            x=x_cylinder,
-            y=y_cylinder,
-            z=z_cylinder,
-            mode='lines',
-            line=dict(color='red', width=2),
-            showlegend=False,
-            hoverinfo='skip'
-        ))
-        
-        # 圆柱体侧面线条
-        for i in range(0, len(theta), 10):
-            fig.add_trace(go.Scatter3d(
-                x=[x_cylinder[i], x_cylinder[i]],
-                y=[y_cylinder[i], y_cylinder[i]],
-                z=[0, z_cylinder[i]],
-                mode='lines',
-                line=dict(color='red', width=1),
-                showlegend=False,
-                hoverinfo='skip'
-            ))
-        
-        # 障碍物中心标记
-        fig.add_trace(go.Scatter3d(
-            x=[obs_wgs_lng],
-            y=[obs_wgs_lat],
-            z=[obs.get("height", 20)],
-            mode='markers+text',
-            marker=dict(size=8, color='red', symbol='x'),
-            text=[obs['name']],
-            textposition='top center',
-            name=obs['name'],
-            hovertemplate=f'{obs["name"]}<br>高度: {obs.get("height", 20)}m<br>半径: {obs["radius"]}m<extra></extra>'
-        ))
+        # 添加障碍物中心标记
+        folium.RegularPolygonMarker(
+            location=[obs_lat_display, obs_lng_display],
+            popup=obs['name'],
+            color='red',
+            fill_color='red',
+            number_of_sides=4,
+            radius=8
+        ).add_to(m)
     
-    # 设置地图布局
-    # 确定地图中心
-    if st.session_state.point_A["set"]:
-        center_lng, center_lat = a_wgs_lng, a_wgs_lat
-    elif st.session_state.point_B["set"]:
-        center_lng, center_lat = b_wgs_lng, b_wgs_lat
-    else:
-        center_lng, center_lat = 118.7492, 32.2332
+    # 添加图例控制
+    legend_html = '''
+    <div style="position: fixed; bottom: 50px; right: 50px; z-index: 1000; background-color: white; padding: 10px; border: 2px solid #333; border-radius: 5px; font-size: 12px;">
+        <p style="margin: 0; font-weight: bold;">图例</p>
+        <p style="margin: 0;"><span style="color: green;">●</span> 起点A</p>
+        <p style="margin: 0;"><span style="color: red;">●</span> 终点B</p>
+        <p style="margin: 0;"><span style="color: yellow;">━</span> 规划航线</p>
+        <p style="margin: 0;"><span style="color: red; background-color: rgba(255,0,0,0.4);">●</span> 障碍物</p>
+        <p style="margin: 0;"><span style="color: blue;">📏</span> 测量工具</p>
+        <p style="margin: 0;"><span style="color: purple;">✏️</span> 绘图工具</p>
+    </div>
+    '''
+    m.get_root().html.add_child(folium.Element(legend_html))
     
-    # 计算地图范围
-    lng_range = 0.005
-    lat_range = 0.005
+    # 添加坐标显示控件
+    folium.plugins.MousePosition().add_to(m)
     
-    fig.update_layout(
-        title=dict(
-            text="3D 航线规划地图",
-            x=0.5,
-            xanchor='center',
-            font=dict(size=20)
-        ),
-        scene=dict(
-            xaxis=dict(
-                title="经度",
-                range=[center_lng - lng_range, center_lng + lng_range],
-                tickformat=".6f"
-            ),
-            yaxis=dict(
-                title="纬度",
-                range=[center_lat - lat_range, center_lat + lat_range],
-                tickformat=".6f"
-            ),
-            zaxis=dict(
-                title="高度 (m)",
-                range=[0, max(100, st.session_state.flight_height + 50)],
-            ),
-            camera=dict(
-                eye=dict(x=1.5, y=1.5, z=1.5),
-                center=dict(x=0, y=0, z=0),
-                up=dict(x=0, y=0, z=1)
-            ),
-            aspectmode='manual',
-            aspectratio=dict(x=1.2, y=1.2, z=0.5)
-        ),
-        showlegend=True,
-        legend=dict(
-            x=0.8,
-            y=0.9,
-            bgcolor='rgba(255, 255, 255, 0.8)',
-            bordercolor='black',
-            borderwidth=1
-        ),
-        height=600,
-        margin=dict(l=0, r=0, t=50, b=0)
-    )
-    
-    # 添加地形背景（使用散点图模拟地形）
-    # 创建网格点
-    lng_grid = np.linspace(center_lng - lng_range, center_lng + lng_range, 20)
-    lat_grid = np.linspace(center_lat - lat_range, center_lat + lat_range, 20)
-    Lng, Lat = np.meshgrid(lng_grid, lat_grid)
-    # 模拟地形高度（简单起伏）
-    Z = 10 * np.sin((Lng - center_lng) * 1000) * np.cos((Lat - center_lat) * 1000) + 5
-    
-    fig.add_trace(go.Surface(
-        x=Lng,
-        y=Lat,
-        z=Z,
-        colorscale='Viridis',
-        opacity=0.3,
-        showscale=False,
-        name='地形',
-        hovertemplate='地面高度: %{z:.1f}m<extra></extra>'
-    ))
-    
-    return fig
+    return m
 
 # ---------------------------- 页面导航 ----------------------------
 st.sidebar.title("导航")
@@ -354,7 +317,7 @@ page = st.sidebar.radio("功能页面", ["航线规划", "飞行监控"])
 # ============================ 航线规划页面 ============================
 if page == "航线规划":
     st.title("🗺️ 航线规划")
-    st.markdown("规划无人机飞行路线，设置起点/终点及飞行高度，3D地图显示障碍物")
+    st.markdown("规划无人机飞行路线，设置起点/终点及飞行高度，地图显示障碍物并支持圈选")
     
     # 侧边栏设置
     st.sidebar.markdown("---")
@@ -367,7 +330,10 @@ if page == "航线规划":
     st.session_state.coord_system = coord_sys.split("(")[0]
     
     st.sidebar.subheader("地图控制")
-    st.sidebar.info("💡 3D地图操作提示:\n• 鼠标拖拽旋转视角\n• 右键拖拽平移\n• 滚轮缩放")
+    zoom = st.sidebar.slider("地图缩放级别", 10, 20, st.session_state.map_zoom, 1)
+    st.session_state.map_zoom = zoom
+    
+    st.sidebar.info("💡 **地图工具说明**:\n\n• 右上角: 全屏按钮\n• 左上角: 测量距离/面积\n• 左上角: 绘图工具(圈选障碍物)\n• 右下角: 图层切换")
     
     # 主控制面板
     col1, col2 = st.columns(2)
@@ -389,10 +355,16 @@ if page == "航线规划":
             format="%.6f", 
             key="a_lng"
         )
-        if st.button("📍 设置A点", use_container_width=True):
-            st.session_state.point_A = {"lat": a_lat, "lng": a_lng, "set": True}
-            st.success("✅ 起点A已设置")
-            st.rerun()
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            if st.button("📍 设置A点", use_container_width=True):
+                st.session_state.point_A = {"lat": a_lat, "lng": a_lng, "set": True}
+                st.success("✅ 起点A已设置")
+                st.rerun()
+        with col_btn2:
+            if st.button("🗑️ 清除A点", use_container_width=True):
+                st.session_state.point_A["set"] = False
+                st.rerun()
         
         # 终点B
         st.write("#### 终点B")
@@ -408,35 +380,43 @@ if page == "航线规划":
             format="%.6f", 
             key="b_lng"
         )
-        if st.button("🎯 设置B点", use_container_width=True):
-            st.session_state.point_B = {"lat": b_lat, "lng": b_lng, "set": True}
-            st.success("✅ 终点B已设置")
-            st.rerun()
+        col_btn3, col_btn4 = st.columns(2)
+        with col_btn3:
+            if st.button("🎯 设置B点", use_container_width=True):
+                st.session_state.point_B = {"lat": b_lat, "lng": b_lng, "set": True}
+                st.success("✅ 终点B已设置")
+                st.rerun()
+        with col_btn4:
+            if st.button("🗑️ 清除B点", use_container_width=True):
+                st.session_state.point_B["set"] = False
+                st.rerun()
         
         # 飞行高度
         st.write("#### 飞行参数")
         height = st.number_input(
             "设定飞行高度 (m)", 
             value=st.session_state.flight_height, 
-            step=5.0
+            step=5.0,
+            help="无人机飞行的高度，会影响航线显示"
         )
         st.session_state.flight_height = height
         
         # 添加障碍物
         st.write("#### 障碍物管理")
-        with st.expander("➕ 添加新障碍物"):
+        with st.expander("➕ 添加新障碍物", expanded=False):
             obs_name = st.text_input("障碍物名称", "新障碍物")
-            obs_lat = st.number_input("纬度", value=32.2330, format="%.6f", key="obs_lat")
-            obs_lng = st.number_input("经度", value=118.7495, format="%.6f", key="obs_lng")
+            col_obs1, col_obs2 = st.columns(2)
+            with col_obs1:
+                obs_lat = st.number_input("纬度", value=32.2330, format="%.6f", key="obs_lat")
+            with col_obs2:
+                obs_lng = st.number_input("经度", value=118.7495, format="%.6f", key="obs_lng")
             obs_radius = st.number_input("半径 (m)", value=25, step=5, key="obs_radius")
-            obs_height = st.number_input("高度 (m)", value=20, step=5, key="obs_height")
-            if st.button("确认添加", key="add_obs"):
+            if st.button("✅ 确认添加", key="add_obs"):
                 st.session_state.obstacles.append({
                     "lat": obs_lat,
                     "lng": obs_lng,
                     "radius": obs_radius,
-                    "name": obs_name,
-                    "height": obs_height
+                    "name": obs_name
                 })
                 st.success(f"已添加障碍物: {obs_name}")
                 st.rerun()
@@ -458,32 +438,48 @@ if page == "航线规划":
         st.info(f"✈️ **飞行高度**: {st.session_state.flight_height} m")
         st.info(f"🗺️ **当前坐标系**: {st.session_state.coord_system}")
         
+        # 统计信息
+        total_distance = 0
+        if st.session_state.point_A["set"] and st.session_state.point_B["set"]:
+            try:
+                from geopy.distance import geodesic
+                a = (st.session_state.point_A["lat"], st.session_state.point_A["lng"])
+                b = (st.session_state.point_B["lat"], st.session_state.point_B["lng"])
+                total_distance = geodesic(a, b).meters
+                st.info(f"📏 **航线距离**: {total_distance:.1f} m")
+            except:
+                pass
+        
         # 障碍物列表
         if st.session_state.obstacles:
             st.write("**🚧 障碍物列表**")
             for i, obs in enumerate(st.session_state.obstacles):
                 col_a, col_b = st.columns([3, 1])
                 with col_a:
-                    st.write(f"{i+1}. {obs['name']} (半径:{obs['radius']}m, 高:{obs.get('height',20)}m)")
+                    st.write(f"{i+1}. {obs['name']} (半径:{obs['radius']}m)")
                 with col_b:
                     if st.button("🗑️", key=f"del_{i}"):
                         st.session_state.obstacles.pop(i)
                         st.rerun()
     
-    # 3D地图显示
-    st.subheader("🗺️ 交互式3D地图")
-    st.markdown("💡 **操作提示**：鼠标拖拽旋转视角 | 右键拖拽平移 | 滚轮缩放 | 点击标记查看详情")
+    # 地图显示区域
+    st.subheader("🗺️ 交互式地图（支持缩放、圈选障碍物）")
+    st.markdown("💡 **操作提示**：")
+    st.markdown("- 🔍 鼠标滚轮缩放 | 🖱️ 鼠标拖拽平移 | 🎯 点击标记查看详情")
+    st.markdown("- 📏 左上角测量工具：可测量距离和面积（用于圈选障碍物范围）")
+    st.markdown("- ✏️ 左上角绘图工具：可绘制多边形圈选障碍物区域")
+    st.markdown("- 🗺️ 右下角可切换地图样式（浅色/深色）")
     
     # 创建并显示地图
     try:
-        fig = create_3d_map()
-        st.plotly_chart(fig, use_container_width=True)
+        m = create_folium_map()
+        folium_static(m, width=1000, height=600)
     except Exception as e:
         st.error(f"地图加载出错: {str(e)}")
-        st.info("请确保已设置A点和B点，或检查坐标是否正确")
+        st.info("请刷新页面重试，或检查网络连接")
     
     # 使用说明
-    with st.expander("📖 详细使用说明"):
+    with st.expander("📖 详细使用说明", expanded=False):
         st.markdown("""
         ### 🎯 功能说明
         
@@ -491,33 +487,34 @@ if page == "航线规划":
         - 在左侧控制面板输入经纬度坐标
         - 点击"设置A点"或"设置B点"按钮
         - 支持 WGS-84 和 GCJ-02 两种坐标系
+        - 可随时清除已设置的点
         
         **2. 飞行参数**
         - 设置飞行高度（单位：米）
-        - 航线会显示在对应高度上
+        - 航线会自动更新显示
         
         **3. 障碍物管理**
-        - 系统预设了校园内的障碍物（教学楼、图书馆等）
-        - 可以添加新的障碍物（需要输入经纬度、半径、高度）
+        - 系统预设了校园内的障碍物（教学楼、图书馆、实验楼、食堂、体育馆）
+        - 可以添加新的障碍物（需要输入名称、经纬度、半径）
         - 可以删除现有障碍物
         
-        **4. 3D地图操作**
-        - **鼠标左键拖拽**：旋转3D视角
-        - **鼠标右键拖拽**：平移地图
-        - **鼠标滚轮**：缩放地图
-        - **点击标记**：查看详细信息
+        **4. 地图工具使用**
+        - **全屏按钮**（右上角）：全屏显示地图
+        - **测量工具**（左上角尺子图标）：点击后在地图上点击两点测量距离，点击三点以上测量面积
+        - **绘图工具**（左上角铅笔图标）：可以绘制多边形、圆形等来圈选障碍物区域
+        - **图层切换**（右下角）：可切换浅色/深色地图样式
         
         **5. 坐标系转换**
         - **WGS-84**：国际标准坐标系（GPS使用）
         - **GCJ-02**：高德/百度地图使用的坐标系（火星坐标系）
-        - 系统会自动转换坐标进行显示
+        - 系统会自动处理坐标转换，确保地图显示准确
         
         **6. 地图元素说明**
-        - 🟢 **绿色点**：起点A
-        - 🔴 **红色点**：终点B
-        - 🟡 **黄色线**：规划航线（显示在设定高度）
-        - 🔴 **红色圆柱**：障碍物（显示高度和半径）
-        - 🌈 **彩色地形**：地形起伏示意
+        - 🟢 **绿色标记**：起点A
+        - 🔴 **红色标记**：终点B
+        - 🟡 **黄色线**：规划航线
+        - 🔴 **红色半透明圆**：障碍物（显示名称和半径）
+        - 📏 **蓝色标记**：测量结果
         """)
 
 # ============================ 飞行监控页面 ============================
@@ -577,6 +574,16 @@ else:
         else:
             st.success("✅ 连接正常")
     
+    # 实时心跳指示器
+    if st.session_state.running and st.session_state.last_ts:
+        time_since_last = time.time() - st.session_state.last_ts
+        if time_since_last < 1:
+            st.success(f"💓 最后心跳: {time_since_last:.1f}秒前")
+        elif time_since_last < 3:
+            st.warning(f"💓 最后心跳: {time_since_last:.1f}秒前")
+        else:
+            st.error(f"💔 最后心跳: {time_since_last:.1f}秒前")
+    
     # 折线图
     if st.session_state.records:
         df = pd.DataFrame(st.session_state.records, columns=["序号", "时间戳"])
@@ -591,8 +598,13 @@ else:
     if st.session_state.records:
         df_table = pd.DataFrame(st.session_state.records, columns=["心跳序号", "时间戳"])
         df_table["接收时间"] = df_table["时间戳"].apply(lambda x: datetime.fromtimestamp(x).strftime("%H:%M:%S"))
-        df_table = df_table[["心跳序号", "接收时间"]]
+        df_table["延迟(ms)"] = df_table["时间戳"].diff().fillna(0) * 1000
+        df_table = df_table[["心跳序号", "接收时间", "延迟(ms)"]]
         st.subheader("📋 心跳包记录（最近20条）")
         st.dataframe(df_table, use_container_width=True, height=400)
     else:
         st.info("📋 暂无记录")
+
+# 底部信息
+st.markdown("---")
+st.markdown("© 2024 无人机地面站系统 | 支持坐标系转换 | 实时心跳监测")
