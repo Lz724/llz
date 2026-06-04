@@ -3,10 +3,7 @@ import pandas as pd
 import time
 import math
 from datetime import datetime
-import folium
-from streamlit_folium import folium_static, st_folium
-from branca.element import Figure
-import branca.colormap as cm
+import pydeck as pdk
 import numpy as np
 
 # ---------------------------- 坐标系转换算法 ----------------------------
@@ -25,6 +22,8 @@ def transform_lng(lng, lat):
     return ret
 
 def wgs84_to_gcj02(lng, lat):
+    if out_of_china(lng, lat):
+        return lng, lat
     dlat = transform_lat(lng - 105.0, lat - 35.0)
     dlng = transform_lng(lng - 105.0, lat - 35.0)
     radlat = lat / 180.0 * math.pi
@@ -65,7 +64,7 @@ def init_state():
         st.session_state.alert_msg = ""
     # 航线规划相关
     if "coord_system" not in st.session_state:
-        st.session_state.coord_system = "GCJ-02"  # 默认高德坐标系
+        st.session_state.coord_system = "GCJ-02"
     if "point_A" not in st.session_state:
         st.session_state.point_A = {"lat": 32.2322, "lng": 118.749, "set": False}
     if "point_B" not in st.session_state:
@@ -73,7 +72,6 @@ def init_state():
     if "flight_height" not in st.session_state:
         st.session_state.flight_height = 50.0
     if "obstacles" not in st.session_state:
-        # 障碍物列表，每个障碍物为 {lat, lng, radius, name}
         st.session_state.obstacles = [
             {"lat": 32.2328, "lng": 118.7485, "radius": 30, "name": "教学楼"},
             {"lat": 32.2335, "lng": 118.7492, "radius": 35, "name": "图书馆"},
@@ -81,6 +79,10 @@ def init_state():
             {"lat": 32.2325, "lng": 118.7495, "radius": 25, "name": "食堂"},
             {"lat": 32.2332, "lng": 118.7488, "radius": 20, "name": "行政楼"},
         ]
+    if "map_zoom" not in st.session_state:
+        st.session_state.map_zoom = 16
+    if "map_center" not in st.session_state:
+        st.session_state.map_center = {"lat": 32.2332, "lng": 118.7492}
 
 init_state()
 
@@ -99,123 +101,153 @@ def reset_monitor():
     st.session_state.records = []
     st.session_state.alert_msg = ""
 
-def create_map():
-    """创建带障碍物和航线规划的folium地图"""
-    # 获取当前坐标系统下的A、B点（用于显示，保持用户输入的坐标系）
-    a_lng, a_lat = st.session_state.point_A["lng"], st.session_state.point_A["lat"]
-    b_lng, b_lat = st.session_state.point_B["lng"], st.session_state.point_B["lat"]
+def create_pydeck_map():
+    """创建pydeck地图，支持3D视图和障碍物显示"""
+    layers = []
     
-    # 地图中心点（如果有A点则居中到A，否则居中校园中心）
+    # 获取当前坐标系统下的A、B点（WGS-84格式用于地图显示）
     if st.session_state.point_A["set"]:
-        center_lat, center_lng = a_lat, a_lng
-    elif st.session_state.point_B["set"]:
-        center_lat, center_lng = b_lat, b_lng
-    else:
-        center_lat, center_lng = 32.2332, 118.7492
-    
-    # 创建地图（使用OpenStreetMap，支持缩放）
-    m = folium.Map(
-        location=[center_lat, center_lng],
-        zoom_start=16,
-        control_scale=True
-    )
-    
-    # 添加全屏按钮
-    folium.plugins.Fullscreen().add_to(m)
-    
-    # 添加测量工具（方便圈选障碍物）
-    folium.plugins.MeasureControl().add_to(m)
-    
-    # 绘制A点（绿色）
-    if st.session_state.point_A["set"]:
-        folium.Marker(
-            location=[a_lat, a_lng],
-            popup=f"起点A<br>纬度: {a_lat:.6f}<br>经度: {a_lng:.6f}",
-            icon=folium.Icon(color="green", icon="play", prefix="fa"),
+        a_wgs_lng, a_wgs_lat = convert_coords(
+            st.session_state.point_A["lat"], 
+            st.session_state.point_A["lng"], 
+            st.session_state.coord_system, 
+            "WGS-84"
+        )
+        # A点标记（绿色）
+        layers.append(pdk.Layer(
+            "ScatterplotLayer",
+            data=[{"lng": a_wgs_lng, "lat": a_wgs_lat, "color": [0, 255, 0], "size": 50}],
+            get_position='[lng, lat]',
+            get_color='color',
+            get_radius='size',
+            pickable=True,
             tooltip="起点A"
-        ).add_to(m)
-        
-        # 添加圆形标记突出显示
-        folium.Circle(
-            radius=15,
-            location=[a_lat, a_lng],
-            color="green",
-            fill=True,
-            fill_opacity=0.3
-        ).add_to(m)
+        ))
+        # A点周围光晕
+        layers.append(pdk.Layer(
+            "ScatterplotLayer",
+            data=[{"lng": a_wgs_lng, "lat": a_wgs_lat, "color": [0, 255, 0, 50], "size": 100}],
+            get_position='[lng, lat]',
+            get_color='color',
+            get_radius='size',
+        ))
     
-    # 绘制B点（红色）
     if st.session_state.point_B["set"]:
-        folium.Marker(
-            location=[b_lat, b_lng],
-            popup=f"终点B<br>纬度: {b_lat:.6f}<br>经度: {b_lng:.6f}",
-            icon=folium.Icon(color="red", icon="flag-checkered", prefix="fa"),
+        b_wgs_lng, b_wgs_lat = convert_coords(
+            st.session_state.point_B["lat"], 
+            st.session_state.point_B["lng"], 
+            st.session_state.coord_system, 
+            "WGS-84"
+        )
+        # B点标记（红色）
+        layers.append(pdk.Layer(
+            "ScatterplotLayer",
+            data=[{"lng": b_wgs_lng, "lat": b_wgs_lat, "color": [255, 0, 0], "size": 50}],
+            get_position='[lng, lat]',
+            get_color='color',
+            get_radius='size',
+            pickable=True,
             tooltip="终点B"
-        ).add_to(m)
-        
-        folium.Circle(
-            radius=15,
-            location=[b_lat, b_lng],
-            color="red",
-            fill=True,
-            fill_opacity=0.3
-        ).add_to(m)
+        ))
+        layers.append(pdk.Layer(
+            "ScatterplotLayer",
+            data=[{"lng": b_wgs_lng, "lat": b_wgs_lat, "color": [255, 0, 0, 50], "size": 100}],
+            get_position='[lng, lat]',
+            get_color='color',
+            get_radius='size',
+        ))
     
-    # 绘制AB连线（航线）
+    # AB连线（3D航线）
     if st.session_state.point_A["set"] and st.session_state.point_B["set"]:
-        points = [[a_lat, a_lng], [b_lat, b_lng]]
-        folium.PolyLine(
-            points,
-            color="yellow",
-            weight=4,
-            opacity=0.8,
-            popup=f"规划航线 (高度: {st.session_state.flight_height}m)"
-        ).add_to(m)
-        
-        # 添加方向箭头（中点位置）
-        mid_lat = (a_lat + b_lat) / 2
-        mid_lng = (a_lng + b_lng) / 2
-        folium.plugins.PolygonDrawToolbar().add_to(m)  # 辅助圈选工具
-    
-    # 绘制障碍物（红色半透明圆）
-    for obs in st.session_state.obstacles:
-        # 将障碍物坐标转换到当前用户坐标系进行显示
-        obs_lng_display, obs_lat_display = convert_coords(
-            obs["lat"], obs["lng"], 
-            from_system="WGS-84", 
-            to_system=st.session_state.coord_system
+        a_wgs_lng, a_wgs_lat = convert_coords(
+            st.session_state.point_A["lat"], 
+            st.session_state.point_A["lng"], 
+            st.session_state.coord_system, 
+            "WGS-84"
+        )
+        b_wgs_lng, b_wgs_lat = convert_coords(
+            st.session_state.point_B["lat"], 
+            st.session_state.point_B["lng"], 
+            st.session_state.coord_system, 
+            "WGS-84"
         )
         
-        folium.Circle(
-            radius=obs["radius"],
-            location=[obs_lat_display, obs_lng_display],
-            color="red",
-            fill=True,
-            fill_opacity=0.4,
-            popup=f"⚠️ {obs['name']}<br>半径: {obs['radius']}m",
-            tooltip=obs["name"]
-        ).add_to(m)
-        
-        # 添加文字标签
-        folium.map.Marker(
-            [obs_lat_display, obs_lng_display],
-            icon=folium.DivIcon(
-                html=f'<div style="font-size: 10pt; color: red; font-weight: bold;">{obs["name"]}</div>'
-            )
-        ).add_to(m)
+        line_data = [{
+            "path": [[a_wgs_lng, a_wgs_lat, st.session_state.flight_height],
+                     [b_wgs_lng, b_wgs_lat, st.session_state.flight_height]],
+            "color": [255, 255, 0]
+        }]
+        layers.append(pdk.Layer(
+            "LineLayer",
+            data=line_data,
+            get_path='path',
+            get_color='color',
+            get_width=5,
+            width_min_pixels=2,
+            pickable=True,
+            tooltip=f"航线高度: {st.session_state.flight_height}m"
+        ))
     
-    # 添加图例
-    legend_html = '''
-    <div style="position: fixed; bottom: 50px; right: 50px; z-index: 1000; background-color: white; padding: 10px; border: 2px solid gray; border-radius: 5px;">
-        <p style="margin: 0;"><span style="color: green;">●</span> 起点A</p>
-        <p style="margin: 0;"><span style="color: red;">●</span> 终点B</p>
-        <p style="margin: 0;"><span style="color: yellow;">━</span> 规划航线</p>
-        <p style="margin: 0;"><span style="color: red; background-color: rgba(255,0,0,0.4);">●</span> 障碍物</p>
-    </div>
-    '''
-    m.get_root().html.add_child(folium.Element(legend_html))
+    # 障碍物（红色半透明圆，转换为WGS-84）
+    obs_data = []
+    for obs in st.session_state.obstacles:
+        obs_wgs_lng, obs_wgs_lat = convert_coords(obs["lat"], obs["lng"], "WGS-84", "WGS-84")
+        obs_data.append({
+            "lng": obs_wgs_lng,
+            "lat": obs_wgs_lat,
+            "radius": obs["radius"],
+            "name": obs["name"]
+        })
     
-    return m
+    if obs_data:
+        layers.append(pdk.Layer(
+            "ScatterplotLayer",
+            data=obs_data,
+            get_position='[lng, lat]',
+            get_radius='radius',
+            get_fill_color="[255, 0, 0, 100]",
+            get_line_color="[255, 0, 0]",
+            pickable=True,
+            auto_highlight=True,
+            radius_scale=1,
+            tooltip="障碍物: {name}"
+        ))
+    
+    # 设置地图视图中心
+    if st.session_state.point_A["set"]:
+        center_wgs_lng, center_wgs_lat = convert_coords(
+            st.session_state.point_A["lat"], 
+            st.session_state.point_A["lng"], 
+            st.session_state.coord_system, 
+            "WGS-84"
+        )
+    elif st.session_state.point_B["set"]:
+        center_wgs_lng, center_wgs_lat = convert_coords(
+            st.session_state.point_B["lat"], 
+            st.session_state.point_B["lng"], 
+            st.session_state.coord_system, 
+            "WGS-84"
+        )
+    else:
+        center_wgs_lng, center_wgs_lat = 118.7492, 32.2332
+    
+    view_state = pdk.ViewState(
+        longitude=center_wgs_lng,
+        latitude=center_wgs_lat,
+        zoom=st.session_state.map_zoom,
+        pitch=45,
+        bearing=0,
+        height=500
+    )
+    
+    deck = pdk.Deck(
+        layers=layers,
+        initial_view_state=view_state,
+        tooltip={"text": "{tooltip}"},
+        map_style="mapbox://styles/mapbox/light-v9"
+    )
+    
+    return deck
 
 # ---------------------------- 页面导航 ----------------------------
 st.sidebar.title("导航")
@@ -224,9 +256,9 @@ page = st.sidebar.radio("功能页面", ["航线规划", "飞行监控"])
 # ============================ 航线规划页面 ============================
 if page == "航线规划":
     st.title("🗺️ 航线规划")
-    st.markdown("规划无人机飞行路线，设置起点/终点及飞行高度，地图显示障碍物并支持圈选")
+    st.markdown("规划无人机飞行路线，设置起点/终点及飞行高度，地图显示障碍物")
     
-    # 坐标系设置区域
+    # 坐标系设置
     st.sidebar.markdown("---")
     st.sidebar.subheader("坐标系设置")
     coord_sys = st.sidebar.selectbox(
@@ -235,6 +267,11 @@ if page == "航线规划":
         index=0 if st.session_state.coord_system == "WGS-84" else 1
     )
     st.session_state.coord_system = coord_sys.split("(")[0]
+    
+    # 地图缩放控制
+    st.sidebar.subheader("地图控制")
+    zoom = st.sidebar.slider("地图缩放级别", 10, 20, st.session_state.map_zoom, 1)
+    st.session_state.map_zoom = zoom
     
     # 主控制面板
     col1, col2 = st.columns(2)
@@ -259,6 +296,7 @@ if page == "航线规划":
         if st.button("📍 设置A点", use_container_width=True):
             st.session_state.point_A = {"lat": a_lat, "lng": a_lng, "set": True}
             st.success("✅ 起点A已设置")
+            st.rerun()
         
         # 终点B输入
         st.write("#### 终点B")
@@ -277,6 +315,7 @@ if page == "航线规划":
         if st.button("🎯 设置B点", use_container_width=True):
             st.session_state.point_B = {"lat": b_lat, "lng": b_lng, "set": True}
             st.success("✅ 终点B已设置")
+            st.rerun()
         
         # 飞行参数
         st.write("#### 飞行参数")
@@ -312,12 +351,18 @@ if page == "航线规划":
     
     with col2:
         st.subheader("系统状态")
-        a_status = "✅ A点已设" if st.session_state.point_A["set"] else "❌ A点未设"
-        b_status = "✅ B点已设" if st.session_state.point_B["set"] else "❌ B点未设"
         
         # 状态卡片
-        st.info(f"**{a_status}**")
-        st.info(f"**{b_status}**")
+        st.info(f"**{'✅' if st.session_state.point_A['set'] else '❌'} A点已设**")
+        if st.session_state.point_A["set"]:
+            st.write(f"  纬度: {st.session_state.point_A['lat']:.6f}")
+            st.write(f"  经度: {st.session_state.point_A['lng']:.6f}")
+        
+        st.info(f"**{'✅' if st.session_state.point_B['set'] else '❌'} B点已设**")
+        if st.session_state.point_B["set"]:
+            st.write(f"  纬度: {st.session_state.point_B['lat']:.6f}")
+            st.write(f"  经度: {st.session_state.point_B['lng']:.6f}")
+        
         st.info(f"**✈️ 飞行高度: {st.session_state.flight_height} m**")
         st.info(f"**🗺️ 当前坐标系: {st.session_state.coord_system}**")
         st.info(f"**🚧 障碍物数量: {len(st.session_state.obstacles)}**")
@@ -329,18 +374,19 @@ if page == "航线规划":
                     col_a, col_b = st.columns([3, 1])
                     with col_a:
                         st.write(f"{i+1}. {obs['name']} (半径:{obs['radius']}m)")
+                        st.caption(f"   {obs['lat']:.6f}, {obs['lng']:.6f}")
                     with col_b:
-                        if st.button("删除", key=f"del_{i}"):
+                        if st.button("🗑️", key=f"del_{i}"):
                             st.session_state.obstacles.pop(i)
                             st.rerun()
     
-    # 地图显示区域（可交互）
-    st.subheader("🗺️ 地图（支持缩放、圈选障碍物）")
-    st.markdown("💡 **提示**：地图支持鼠标滚轮缩放、拖拽平移。右侧工具栏可进行测量和圈选。")
+    # 地图显示区域
+    st.subheader("🗺️ 3D 地图（支持缩放、旋转）")
+    st.markdown("💡 **提示**：鼠标左键拖拽旋转视角，右键拖拽平移，滚轮缩放。红色圆圈为障碍物，绿色为起点A，红色为终点B，黄色线为规划航线。")
     
     # 创建并显示地图
-    m = create_map()
-    folium_static(m, width=1000, height=600)
+    deck = create_pydeck_map()
+    st.pydeck_chart(deck, use_container_width=True)
     
     # 使用说明
     with st.expander("📖 使用说明"):
@@ -349,15 +395,14 @@ if page == "航线规划":
         1. **设置起点/终点**：在左侧控制面板输入经纬度坐标，点击按钮设置
         2. **坐标系选择**：在侧边栏选择输入坐标系（WGS-84 或 GCJ-02/高德）
         3. **地图操作**：
+           - 鼠标左键拖拽：旋转3D视角
+           - 鼠标右键拖拽：平移地图
            - 鼠标滚轮：缩放地图
-           - 鼠标拖拽：平移地图
-           - 右上角全屏按钮：全屏显示
-           - 右侧测量工具：测量距离和面积
         4. **障碍物**：
            - 红色半透明圆圈代表障碍物
            - 可以添加新的障碍物或删除现有障碍物
            - 障碍物默认位于校园内，AB点之间
-        5. **航线规划**：黄色线连接A点和B点，显示规划航线
+        5. **航线规划**：黄色线连接A点和B点，显示规划航线（带飞行高度）
         """)
 
 # ============================ 飞行监控页面 ============================
@@ -392,7 +437,7 @@ else:
         else:
             diff = now - last
             if diff >= 1.0:
-                n = min(int(diff), 5)  # 补偿最多5个心跳
+                n = min(int(diff), 5)
                 for i in range(n):
                     new_seq = st.session_state.seq + 1
                     sim_ts = last + (i + 1)
